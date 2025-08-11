@@ -25,7 +25,6 @@ except KeyError:
     st.error("`GOOGLE_API_KEY` not found in `.streamlit/secrets.toml`. Please add it to your secrets file.")
     st.stop()
 
-
 def get_user_db():
     if not os.path.exists("users.json"):
         with open("users.json", "w") as f:
@@ -61,7 +60,6 @@ def register_user(username, password):
     _ensure_chat_dir(username)
     return True
 
-
 def load_document(file_path_or_url):
     if os.path.exists(file_path_or_url): 
         _, file_extension = os.path.splitext(file_path_or_url)
@@ -75,14 +73,28 @@ def load_document(file_path_or_url):
             loader = CSVLoader(file_path_or_url)
         else:
             raise ValueError(f"Unsupported file type: {file_extension}")
+        
+        docs = loader.load()
+        for doc in docs:
+            doc.metadata['source_file'] = os.path.basename(file_path_or_url)
+            doc.metadata['source_type'] = 'uploaded_file'
+        return docs
     else: 
         try:
             loader = WebBaseLoader(file_path_or_url)
+            docs = loader.load()
+            
+            from urllib.parse import urlparse
+            parsed_url = urlparse(file_path_or_url)
+            domain = parsed_url.netloc
+            
+            for doc in docs:
+                doc.metadata['source_file'] = f"{domain} (Web Content)"
+                doc.metadata['source_type'] = 'web_url'
+                doc.metadata['source_url'] = file_path_or_url
+            return docs
         except Exception as e:
             raise ValueError(f"Could not load from URL. Error: {e}")
-
-    return loader.load()
-
 
 def get_conversational_agent(vector_store, source_description):
     llm = ChatGoogleGenerativeAI(
@@ -143,7 +155,6 @@ def process_and_store_docs(username, file_or_url):
 def load_vector_store(path):
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
     return FAISS.load_local(path, embeddings, allow_dangerous_deserialization=True)
-
 
 def save_chat_history(username, chat_id, chat_history):
     chat_dir = _ensure_chat_dir(username)
@@ -211,7 +222,6 @@ def delete_chat_history(username, chat_id):
         os.remove(history_file)
 
 def extract_pdf_content(file_path):
-    """Extract text content from PDF file"""
     try:
         reader = PdfReader(file_path)
         text = ""
@@ -222,7 +232,6 @@ def extract_pdf_content(file_path):
         return f"Error reading PDF: {str(e)}"
 
 def extract_docx_content(file_path):
-    """Extract text content from Word document"""
     try:
         doc = Document(file_path)
         text = ""
@@ -233,11 +242,9 @@ def extract_docx_content(file_path):
         return f"Error reading Word document: {str(e)}"
 
 def get_scraped_websites():
-    """Get list of available scraped websites"""
     return ["RBI"]
 
 def get_scraped_data_files(website):
-    """Get list of scraped data files for a specific website"""
     website_dir = os.path.join("scraped_data", website)
     if not os.path.exists(website_dir):
         return []
@@ -246,16 +253,13 @@ def get_scraped_data_files(website):
     for file_name in os.listdir(website_dir):
         if file_name.endswith(('.txt', '.pdf', '.csv', '.json', '.md', '.html')):
             file_path = os.path.join(website_dir, file_name)
-            # Get file modification time for sorting
             mod_time = os.path.getmtime(file_path)
             files.append((file_name, mod_time))
     
-    # Sort by modification time (newest first)
     files.sort(key=lambda x: x[1], reverse=True)
     return [file_name for file_name, _ in files]
 
 def read_scraped_data_file(website, file_name):
-    """Read content from a scraped data file"""
     file_path = os.path.join("scraped_data", website, file_name)
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -264,22 +268,18 @@ def read_scraped_data_file(website, file_name):
         return f"Error reading file: {str(e)}"
 
 def get_website_full_name(website_code):
-    """Get full name of website from code"""
     website_names = {
         "RBI": "Reserve Bank of India"
     }
     return website_names.get(website_code, website_code)
 
 def get_preloaded_docs_path():
-    """Get path to preloaded documents directory"""
     return os.path.join("preloaded_docs")
 
 def get_global_vector_store_path():
-    """Get path to global vector store for preloaded documents"""
     return os.path.join("global_knowledge_base")
 
 def load_preloaded_documents():
-    """Load all preloaded PDF documents"""
     preloaded_path = get_preloaded_docs_path()
     if not os.path.exists(preloaded_path):
         return []
@@ -302,7 +302,6 @@ def load_preloaded_documents():
     return documents
 
 def create_global_knowledge_base():
-    """Create or update global knowledge base with preloaded documents"""
     global_vector_path = get_global_vector_store_path()
     
     preloaded_docs = load_preloaded_documents()
@@ -320,10 +319,8 @@ def create_global_knowledge_base():
     )
     documents = text_splitter.split_documents(preloaded_docs)
     
-    # Create vector store
     vectordb = FAISS.from_documents(documents, embeddings)
     
-    # Save global vector store
     os.makedirs(global_vector_path, exist_ok=True)
     vectordb.save_local(global_vector_path)
     
@@ -331,7 +328,6 @@ def create_global_knowledge_base():
     return vectordb
 
 def load_global_vector_store():
-    """Load global vector store if it exists"""
     global_vector_path = get_global_vector_store_path()
     if not os.path.exists(global_vector_path):
         return None
@@ -344,13 +340,11 @@ def load_global_vector_store():
         return None
 
 def get_combined_conversational_agent(user_vector_store, global_vector_store, source_description):
-    """Create conversational agent that searches both user documents and global knowledge base"""
     llm = ChatGoogleGenerativeAI(
         model="gemini-1.5-flash",
         temperature=0.7
     )
     
-    # Create retrievers
     retrievers = []
     if user_vector_store:
         user_retriever = user_vector_store.as_retriever(search_kwargs={"k": 3})
@@ -363,7 +357,6 @@ def get_combined_conversational_agent(user_vector_store, global_vector_store, so
     from langchain.prompts import PromptTemplate
     
     def combined_retrieval(query):
-        """Retrieve from both user documents and global knowledge base"""
         all_docs = []
         sources = []
         
@@ -377,7 +370,6 @@ def get_combined_conversational_agent(user_vector_store, global_vector_store, so
             except Exception as e:
                 print(f"Error retrieving from {source_name}: {e}")
         
-        # Sort by relevance and limit total results
         return all_docs[:6]
     
     template = """You are an intelligent document analysis AI assistant. You have access to both user-uploaded documents and a preloaded knowledge base of important documents.
@@ -409,7 +401,6 @@ def get_combined_conversational_agent(user_vector_store, global_vector_store, so
         input_variables=["context", "question"]
     )
     
-    # Create a custom chain that uses our combined retrieval
     class CombinedRetrievalQA:
         def __init__(self, llm, prompt, retrieval_fn):
             self.llm = llm
@@ -420,13 +411,11 @@ def get_combined_conversational_agent(user_vector_store, global_vector_store, so
             query = inputs.get("query") or inputs.get("input")
             docs = self.retrieval_fn(query)
             
-            # Format context
             context = "\n\n".join([
                 f"Source: {doc.metadata.get('retrieval_source', 'unknown')} - {doc.metadata.get('source_file', 'unknown file')}\n{doc.page_content}"
                 for doc in docs
             ])
             
-            # Generate response
             formatted_prompt = self.prompt.format(context=context, question=query)
             response = self.llm.invoke(formatted_prompt)
             
@@ -438,7 +427,6 @@ def get_combined_conversational_agent(user_vector_store, global_vector_store, so
     return CombinedRetrievalQA(llm, prompt, combined_retrieval)
 
 def list_preloaded_documents():
-    """List all preloaded PDF documents"""
     preloaded_path = get_preloaded_docs_path()
     if not os.path.exists(preloaded_path):
         return []
@@ -447,7 +435,6 @@ def list_preloaded_documents():
     return sorted(pdf_files)
 
 def check_global_knowledge_base_status():
-    """Check if global knowledge base exists and get info about it"""
     global_vector_path = get_global_vector_store_path()
     preloaded_docs = list_preloaded_documents()
     
@@ -458,35 +445,32 @@ def check_global_knowledge_base_status():
     }
 
 def get_user_uploaded_document(username):
-    """Get the currently uploaded document for a user (only one allowed)"""
     user_dir = os.path.join("user_data", username)
     if not os.path.exists(user_dir):
         return None
     
-    # Look for uploaded documents
     uploaded_files = [f for f in os.listdir(user_dir) if f.endswith(('.pdf', '.docx', '.txt', '.csv'))]
     
+    url_files = [f for f in os.listdir(user_dir) if f.endswith('.url')]
+    
     if uploaded_files:
-        return uploaded_files[0]  # Return the first (and should be only) document
+        return uploaded_files[0]
+    elif url_files:
+        return url_files[0].replace('.url', ' (Web Content)')
     return None
 
 def delete_user_document_and_index(username, filename=None):
-    """Delete user's uploaded document and vector index"""
     user_dir = os.path.join("user_data", username)
     vector_store_path = os.path.join(user_dir, "faiss_index")
     
-    # If filename not provided, get the current document
-    if filename is None:
-        filename = get_user_uploaded_document(username)
+    if os.path.exists(user_dir):
+        for file in os.listdir(user_dir):
+            if file.endswith(('.pdf', '.docx', '.txt', '.csv', '.url')):
+                file_path = os.path.join(user_dir, file)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    print(f"Deleted file: {file}")
     
-    if filename:
-        # Delete the document file
-        file_path = os.path.join(user_dir, filename)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-            print(f"Deleted document: {filename}")
-    
-    # Delete the vector index directory
     if os.path.exists(vector_store_path):
         import shutil
         shutil.rmtree(vector_store_path)
@@ -495,13 +479,9 @@ def delete_user_document_and_index(username, filename=None):
     return True
 
 def has_user_uploaded_document(username):
-    """Check if user has already uploaded a document"""
     return get_user_uploaded_document(username) is not None
 
 def process_and_store_single_doc(username, file_or_url):
-    """Process and store a single document (replaces any existing document)"""
-    # First, delete any existing document and index
     delete_user_document_and_index(username)
     
-    # Then process the new document
     process_and_store_docs(username, file_or_url)
