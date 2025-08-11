@@ -30,8 +30,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 st.set_page_config(page_title="APMH ChatBot", layout="wide", page_icon="🤖")
 
-
-
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "username" not in st.session_state:
@@ -50,9 +48,19 @@ if "selected_website" not in st.session_state:
     st.session_state.selected_website = None
 if "viewing_kb_file" not in st.session_state:
     st.session_state.viewing_kb_file = None
+if "suggested_questions" not in st.session_state:
+    st.session_state.suggested_questions = []
+if "pending_question" not in st.session_state:
+    st.session_state.pending_question = None
 
 def show_login_page():
-    st.title("🤖 APMH ChatBot")
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        try:
+            st.image("logo.jpeg", width=200)
+        except:
+            st.title("🤖 APMH ChatBot")
+    
     st.markdown("### Secure Login for Document Analysis")
     st.info("📄 Intelligent chatbot for analyzing and extracting insights from your documents")
 
@@ -133,13 +141,83 @@ def show_chat_page():
                         st.session_state.chat_history = []
                     st.rerun()
         
-        with st.expander("📄 Document Sources", expanded=not os.path.exists(vector_store_path)):
-            st.markdown("**Upload documents for analysis**")
-            
-            # Check if user already has a document
-            current_doc = get_user_uploaded_document(st.session_state.username)
-            
-            if current_doc:
+        current_doc = get_user_uploaded_document(st.session_state.username)
+        
+        if not current_doc:
+            with st.expander("📄 Document Sources", expanded=True):
+                st.markdown("**Upload documents for analysis**")
+                
+                source_type = st.radio("Choose data source:", ("📄 Upload Document", "🌐 Web URL"))
+                
+                if source_type == "📄 Upload Document":
+                    st.markdown("*Supported: PDFs, Word documents, text files, CSV files*")
+                    uploaded_file = st.file_uploader("Upload document", type=['pdf', 'docx', 'txt', 'csv'])
+                    if uploaded_file:
+                        file_path = os.path.join(user_dir, uploaded_file.name)
+                        with open(file_path, "wb") as f:
+                            f.write(uploaded_file.getbuffer())
+                        st.success(f"✅ Document '{uploaded_file.name}' uploaded successfully!")
+                        st.info("📁 Go to 'Current Document' section below to build the FAISS index.")
+                        st.rerun()
+                else:
+                    st.markdown("*Examples: Web pages, articles, online documents*")
+                    url_input = st.text_input("Enter web URL")
+                    if url_input and st.button("📥 Download from URL"):
+                        try:
+                            if not url_input.startswith(('http://', 'https://')):
+                                url_input = 'https://' + url_input
+                            
+                            progress_container = st.container()
+                            with progress_container:
+                                progress_bar = st.progress(0)
+                                status_text = st.empty()
+                                
+                                status_text.text("🔍 Validating URL...")
+                                progress_bar.progress(20)
+                                
+                                status_text.text("📥 Downloading web content...")
+                                progress_bar.progress(50)
+                                
+                                process_and_store_docs(st.session_state.username, url_input)
+                                
+                                status_text.text("✅ Verifying FAISS index creation...")
+                                progress_bar.progress(80)
+                                
+                                vector_store_path = os.path.join(user_dir, "faiss_index")
+                                if os.path.exists(vector_store_path):
+                                    files = os.listdir(vector_store_path)
+                                    if 'index.faiss' in files and 'index.pkl' in files:
+                                        status_text.text("✅ FAISS index created successfully!")
+                                        progress_bar.progress(100)
+                                        
+                                        from urllib.parse import urlparse
+                                        parsed_url = urlparse(url_input)
+                                        marker_filename = f"web_content_{parsed_url.netloc.replace('.', '_')}.url"
+                                        marker_path = os.path.join(user_dir, marker_filename)
+                                        with open(marker_path, 'w') as f:
+                                            f.write(f"Source URL: {url_input}\n")
+                                            f.write(f"Processed: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                                        
+                                        st.success(f"✅ Web content from '{url_input}' processed and indexed successfully!")
+                                        st.info("💬 You can now start chatting with the web content.")
+                                    else:
+                                        st.error("❌ FAISS index files not found after processing!")
+                                        return
+                                else:
+                                    st.error("❌ Vector store directory not created!")
+                                    return
+                                
+                                st.rerun()
+                            
+                        except Exception as e:
+                            st.error(f"Error processing URL: {str(e)}")
+                            with st.expander("🔍 Error Details", expanded=False):
+                                st.text("Full error traceback:")
+                                import traceback
+                                st.text(traceback.format_exc())
+        else:
+            with st.expander("📄 Document Management", expanded=False):
+                st.markdown("**Manage your current document**")
                 st.info(f"📄 Current document: **{current_doc}**")
                 st.warning("⚠️ Only one document allowed at a time")
                 
@@ -156,7 +234,6 @@ def show_chat_page():
                         st.session_state.replace_mode = True
                         st.rerun()
                 
-                # Show replace mode interface
                 if st.session_state.get("replace_mode", False):
                     st.markdown("---")
                     st.markdown("**Replace current document:**")
@@ -179,37 +256,29 @@ def show_chat_page():
                     col1, col2 = st.columns(2)
                     with col1:
                         if source_input and st.button("✅ Confirm Replace", use_container_width=True):
-                            # Create progress indicators for replacement
                             progress_container = st.container()
                             with progress_container:
                                 progress_bar = st.progress(0)
                                 status_text = st.empty()
                                 
                                 try:
-                                    # Step 1: Initialize replacement
                                     status_text.text("🔄 Initializing document replacement...")
                                     progress_bar.progress(10)
                                     
-                                    # Step 2: Delete old document and index
                                     status_text.text("🗑️ Removing old document and index...")
                                     progress_bar.progress(25)
                                     
-                                    # Step 3: Load and parse new document
                                     status_text.text("📄 Loading and parsing new document...")
                                     progress_bar.progress(45)
                                     
-                                    # Step 4: Create embeddings and FAISS index
                                     status_text.text("🧠 Creating embeddings and building FAISS index...")
                                     progress_bar.progress(70)
                                     
-                                    # Process the replacement
                                     process_and_store_single_doc(st.session_state.username, source_input)
                                     
-                                    # Step 5: Verify index creation
                                     status_text.text("✅ Verifying FAISS index creation...")
                                     progress_bar.progress(85)
                                     
-                                    # Check if vector store was created successfully
                                     if os.path.exists(vector_store_path):
                                         files = os.listdir(vector_store_path)
                                         if 'index.faiss' in files and 'index.pkl' in files:
@@ -222,14 +291,12 @@ def show_chat_page():
                                         st.error("❌ Vector store directory not created!")
                                         return
                                     
-                                    # Complete
                                     status_text.text("🎉 Document replacement completed successfully!")
                                     progress_bar.progress(100)
                                     
                                     st.session_state.agent_executor = None
                                     st.session_state.replace_mode = False
                                     
-                                    # Show success message
                                     doc_name = os.path.basename(source_input) if os.path.exists(source_input) else "Web content"
                                     st.success(f"✅ Document replaced with '{doc_name}' successfully!")
                                     st.info("💬 You can now start chatting with your new document.")
@@ -241,7 +308,6 @@ def show_chat_page():
                                     status_text.text("❌ Error occurred during replacement")
                                     st.error(f"Error replacing document: {str(e)}")
                                     
-                                    # Show detailed error information
                                     with st.expander("🔍 Error Details", expanded=False):
                                         st.text("Full error traceback:")
                                         import traceback
@@ -251,50 +317,9 @@ def show_chat_page():
                         if st.button("❌ Cancel Replace", use_container_width=True):
                             st.session_state.replace_mode = False
                             st.rerun()
-            
-            else:
-                source_type = st.radio("Choose data source:", ("📄 Upload Document", "🌐 Web URL"))
-                
-                if source_type == "📄 Upload Document":
-                    st.markdown("*Supported: PDFs, Word documents, text files, CSV files*")
-                    uploaded_file = st.file_uploader("Upload document", type=['pdf', 'docx', 'txt', 'csv'])
-                    if uploaded_file:
-                        file_path = os.path.join(user_dir, uploaded_file.name)
-                        with open(file_path, "wb") as f:
-                            f.write(uploaded_file.getbuffer())
-                        st.success(f"✅ Document '{uploaded_file.name}' uploaded successfully!")
-                        st.info("📁 Go to 'Current Document' section below to build the FAISS index.")
-                        st.rerun()
-                else:
-                    st.markdown("*Examples: Web pages, articles, online documents*")
-                    url_input = st.text_input("Enter web URL")
-                    if url_input and st.button("📥 Download from URL"):
-                        try:
-                            # Simple URL validation
-                            if not url_input.startswith(('http://', 'https://')):
-                                url_input = 'https://' + url_input
-                            
-                            # Create a simple filename from URL
-                            from urllib.parse import urlparse
-                            parsed_url = urlparse(url_input)
-                            filename = f"web_content_{parsed_url.netloc.replace('.', '_')}.txt"
-                            file_path = os.path.join(user_dir, filename)
-                            
-                            # Save URL as a text file for processing
-                            with open(file_path, 'w') as f:
-                                f.write(f"URL: {url_input}\n")
-                                f.write("This file represents web content to be processed.")
-                            
-                            st.success(f"✅ URL '{url_input}' saved for processing!")
-                            st.info("📁 Go to 'Current Document' section below to build the FAISS index.")
-                            st.rerun()
-                            
-                        except Exception as e:
-                            st.error(f"Error saving URL: {str(e)}")
         
-        current_doc = get_user_uploaded_document(st.session_state.username)
         if current_doc:
-            with st.expander("📁 Current Document", expanded=False):
+            with st.expander("📁 Current Document", expanded=True):
                 col1, col2, col3 = st.columns([3, 1, 1])
                 with col1:
                     st.text(f"📄 {current_doc}")
@@ -311,7 +336,6 @@ def show_chat_page():
                         st.success("✅ Document deleted!")
                         st.rerun()
                 
-                # Show FAISS index status
                 st.markdown("---")
                 st.markdown("**📊 FAISS Index Status:**")
                 
@@ -319,11 +343,9 @@ def show_chat_page():
                     try:
                         files = os.listdir(vector_store_path)
                         if 'index.faiss' in files and 'index.pkl' in files:
-                            # Get file sizes for display
                             faiss_size = os.path.getsize(os.path.join(vector_store_path, 'index.faiss'))
                             pkl_size = os.path.getsize(os.path.join(vector_store_path, 'index.pkl'))
-                            
-                            # Convert bytes to human readable format
+                         
                             def format_bytes(bytes_size):
                                 for unit in ['B', 'KB', 'MB', 'GB']:
                                     if bytes_size < 1024.0:
@@ -338,12 +360,10 @@ def show_chat_page():
                             with col2:
                                 st.text(f"📦 index.pkl: {format_bytes(pkl_size)}")
                             
-                            # Show creation time
                             creation_time = os.path.getctime(os.path.join(vector_store_path, 'index.faiss'))
                             creation_date = datetime.datetime.fromtimestamp(creation_time).strftime("%Y-%m-%d %H:%M:%S")
                             st.text(f"🕒 Created: {creation_date}")
                             
-                            # Test index functionality
                             try:
                                 vector_store = load_vector_store(vector_store_path)
                                 if vector_store:
@@ -361,11 +381,29 @@ def show_chat_page():
                 else:
                     st.warning("⚠️ **No FAISS Index Found**")
                     st.text("Click 'Build Index' below to create the FAISS index")
-                    if st.button("� Build Index", key="rebuild_index", use_container_width=True):
+                    if st.button("🔧 Build Index", key="rebuild_index", use_container_width=True):
                         with st.spinner("Building FAISS index..."):
                             try:
-                                file_path = os.path.join(user_dir, current_doc)
-                                process_and_store_docs(st.session_state.username, file_path)
+                                if "(Web Content)" in current_doc:
+                                    url_files = [f for f in os.listdir(user_dir) if f.endswith('.url')]
+                                    if url_files:
+                                        marker_file_path = os.path.join(user_dir, url_files[0])
+                                        with open(marker_file_path, 'r') as f:
+                                            content = f.read()
+                                            url_line = [line for line in content.split('\n') if line.startswith('Source URL:')]
+                                            if url_line:
+                                                source_url = url_line[0].replace('Source URL:', '').strip()
+                                                process_and_store_docs(st.session_state.username, source_url)
+                                            else:
+                                                st.error("❌ Could not find source URL in marker file!")
+                                                return
+                                    else:
+                                        st.error("❌ Could not find URL marker file!")
+                                        return
+                                else:
+                                    file_path = os.path.join(user_dir, current_doc)
+                                    process_and_store_docs(st.session_state.username, file_path)
+                                
                                 st.session_state.agent_executor = None
                                 st.success("✅ Index rebuilt successfully!")
                                 st.rerun()
@@ -394,7 +432,7 @@ def show_chat_page():
                     if st.button("🔄 Build Knowledge Base", use_container_width=True):
                         with st.spinner("Building global knowledge base..."):
                             create_global_knowledge_base()
-                            st.session_state.agent_executor = None  # Reset agent to use new KB
+                            st.session_state.agent_executor = None
                         st.success("✅ Knowledge base built successfully!")
                         st.rerun()
                 else:
@@ -402,14 +440,13 @@ def show_chat_page():
                     if st.button("🔄 Rebuild Knowledge Base", use_container_width=True):
                         with st.spinner("Rebuilding global knowledge base..."):
                             create_global_knowledge_base()
-                            st.session_state.agent_executor = None  # Reset agent to use new KB
+                            st.session_state.agent_executor = None
                         st.success("✅ Knowledge base rebuilt successfully!")
                         st.rerun()
             else:
                 st.warning("⚠️ No preloaded documents found")
                 st.info("Place PDF files in the 'preloaded_docs' folder to create a knowledge base")
 
-        # RBI Data Section
         with st.expander("🏦 RBI Updates", expanded=False):
             st.markdown("**Latest updates from Reserve Bank of India**")
             files = get_scraped_data_files("RBI")
@@ -418,19 +455,33 @@ def show_chat_page():
                 if st.button(f"📋 RBI ({len(files)} updates)", key="website_RBI", use_container_width=True):
                     st.session_state.selected_website = "RBI"
                     st.session_state.viewing_scraped_data = True
-                    st.session_state.current_chat_id = None  # Clear chat when viewing scraped data
-                    st.session_state.viewing_file = None  # Clear file viewing
+                    st.session_state.current_chat_id = None
+                    st.session_state.viewing_file = None
                     st.rerun()
             else:
                 st.text("📋 RBI (No updates)")
 
+        if st.session_state.current_chat_id and st.session_state.suggested_questions:
+            with st.expander("💡 Suggested Questions", expanded=False):
+                st.markdown("**Quick questions to explore your documents:**")
+                
+                for i, question in enumerate(st.session_state.suggested_questions[-6:]):
+                    if st.button(f"💬 {question}", key=f"sidebar_suggestion_{i}", use_container_width=True):
+                        st.session_state.chat_history.append(HumanMessage(content=question))
+                        st.rerun()
+                
+                if len(st.session_state.suggested_questions) > 6:
+                    st.caption(f"Showing latest 6 of {len(st.session_state.suggested_questions)} suggestions")
+                
+                if st.button("🗑️ Clear Suggestions", use_container_width=True):
+                    st.session_state.suggested_questions = []
+                    st.rerun()
+
     st.title("🤖 APMH ChatBot")
 
-    # Handle knowledge base file viewing FIRST (before any other checks)
     if st.session_state.viewing_kb_file:
         kb_file_path = os.path.join("preloaded_docs", st.session_state.viewing_kb_file)
         
-        # Add a back button and file info
         col1, col2 = st.columns([1, 4])
         with col1:
             if st.button("← Back to Chat"):
@@ -442,9 +493,7 @@ def show_chat_page():
         st.divider()
         
         try:
-            # Knowledge base files are PDFs
             if st.session_state.viewing_kb_file.endswith('.pdf'):
-                # Add download option for PDF
                 with open(kb_file_path, "rb") as pdf_file:
                     pdf_bytes = pdf_file.read()
                 
@@ -455,7 +504,6 @@ def show_chat_page():
                     mime="application/pdf"
                 )
                 
-                # Extract and display PDF content as text
                 with st.spinner("Extracting PDF content..."):
                     content = extract_pdf_content(kb_file_path)
                 if content and not content.startswith("Error"):
@@ -469,13 +517,9 @@ def show_chat_page():
                 
         except Exception as e:
             st.error(f"Error reading knowledge base file: {str(e)}")
-        return  # Exit early when viewing knowledge base file
+        return
 
-    # Handle user file viewing SECOND (before any other checks)
     elif st.session_state.viewing_file:
-        file_path = os.path.join(user_dir, st.session_state.viewing_file)
-        
-        # Add a back button and file info
         col1, col2 = st.columns([1, 4])
         with col1:
             if st.button("← Back to Chat"):
@@ -486,60 +530,101 @@ def show_chat_page():
         
         st.divider()
         
-        try:
-            if st.session_state.viewing_file.endswith('.txt'):
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                st.text_area("File Content:", content, height=500)
-                
-            elif st.session_state.viewing_file.endswith('.csv'):
-                import pandas as pd
-                df = pd.read_csv(file_path)
-                st.dataframe(df, use_container_width=True)
-                st.info(f"📊 CSV file with {len(df)} rows and {len(df.columns)} columns")
-                
-            elif st.session_state.viewing_file.endswith('.pdf'):
-                # Add download option for PDF
-                with open(file_path, "rb") as pdf_file:
-                    pdf_bytes = pdf_file.read()
-                
-                st.download_button(
-                    label="📥 Download PDF",
-                    data=pdf_bytes,
-                    file_name=st.session_state.viewing_file,
-                    mime="application/pdf"
-                )
-                
-                # Extract and display PDF content as text
-                with st.spinner("Extracting PDF content..."):
-                    content = extract_pdf_content(file_path)
-                if content and not content.startswith("Error"):
-                    st.text_area("PDF Content:", content, height=500)
-                    st.info(f"📄 PDF content extracted successfully. {len(content.split())} words found.")
+        if "(Web Content)" in st.session_state.viewing_file:
+            try:
+                url_files = [f for f in os.listdir(user_dir) if f.endswith('.url')]
+                if url_files:
+                    marker_file_path = os.path.join(user_dir, url_files[0])
+                    with open(marker_file_path, 'r') as f:
+                        marker_content = f.read()
+                        url_line = [line for line in marker_content.split('\n') if line.startswith('Source URL:')]
+                        if url_line:
+                            source_url = url_line[0].replace('Source URL:', '').strip()
+                            
+                            st.info(f"🌐 **Web Content Source**: {source_url}")
+                            
+                            with st.spinner("Fetching web content..."):
+                                try:
+                                    from langchain_community.document_loaders import WebBaseLoader
+                                    loader = WebBaseLoader(source_url)
+                                    docs = loader.load()
+                                    
+                                    if docs:
+                                        content = docs[0].page_content
+                                        st.text_area("Web Content:", content, height=500)
+                                        st.info(f"🌐 Web content fetched successfully. {len(content.split())} words found.")
+                                        
+                                        if docs[0].metadata:
+                                            with st.expander("📋 Content Metadata", expanded=False):
+                                                for key, value in docs[0].metadata.items():
+                                                    st.text(f"**{key}**: {value}")
+                                    else:
+                                        st.warning("⚠️ No content could be extracted from the web page.")
+                                        
+                                except Exception as e:
+                                    st.error(f"❌ Error fetching web content: {str(e)}")
+                                    st.info("💬 The web content has been processed and indexed for chat. Use the chat feature to ask questions about this content.")
+                        else:
+                            st.error("❌ Could not find source URL in marker file.")
                 else:
-                    st.error(content if content.startswith("Error") else "Could not extract content from PDF")
-                    st.info("📄 PDF files are processed and indexed for analysis. Use the chat feature to ask questions about this document.")
-                
-            elif st.session_state.viewing_file.endswith('.docx'):
-                with st.spinner("Extracting Word document content..."):
-                    content = extract_docx_content(file_path)
-                if content and not content.startswith("Error"):
-                    st.text_area("Document Content:", content, height=500)
-                    st.info(f"📝 Word document content extracted successfully. {len(content.split())} words found.")
-                else:
-                    st.error(content if content.startswith("Error") else "Could not extract content from Word document")
-                    st.info("📝 Word documents are processed and indexed for analysis. Use the chat feature to ask questions about this document.")
-                
-        except Exception as e:
-            st.error(f"Error reading file: {str(e)}")
-        return  # Exit early when viewing file
+                    st.error("❌ Could not find web content marker file.")
+                    
+            except Exception as e:
+                st.error(f"❌ Error accessing web content information: {str(e)}")
+                st.info("💬 The web content has been processed and indexed for chat. Use the chat feature to ask questions about this content.")
+        else:
+            file_path = os.path.join(user_dir, st.session_state.viewing_file)
+            
+            try:
+                if st.session_state.viewing_file.endswith('.txt'):
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    st.text_area("File Content:", content, height=500)
+                    
+                elif st.session_state.viewing_file.endswith('.csv'):
+                    import pandas as pd
+                    df = pd.read_csv(file_path)
+                    st.dataframe(df, use_container_width=True)
+                    st.info(f"📊 CSV file with {len(df)} rows and {len(df.columns)} columns")
+                    
+                elif st.session_state.viewing_file.endswith('.pdf'):
+                    with open(file_path, "rb") as pdf_file:
+                        pdf_bytes = pdf_file.read()
+                    
+                    st.download_button(
+                        label="📥 Download PDF",
+                        data=pdf_bytes,
+                        file_name=st.session_state.viewing_file,
+                        mime="application/pdf"
+                    )
+                    
+                    with st.spinner("Extracting PDF content..."):
+                        content = extract_pdf_content(file_path)
+                    if content and not content.startswith("Error"):
+                        st.text_area("PDF Content:", content, height=500)
+                        st.info(f"📄 PDF content extracted successfully. {len(content.split())} words found.")
+                    else:
+                        st.error(content if content.startswith("Error") else "Could not extract content from PDF")
+                        st.info("📄 PDF files are processed and indexed for analysis. Use the chat feature to ask questions about this document.")
+                    
+                elif st.session_state.viewing_file.endswith('.docx'):
+                    with st.spinner("Extracting Word document content..."):
+                        content = extract_docx_content(file_path)
+                    if content and not content.startswith("Error"):
+                        st.text_area("Document Content:", content, height=500)
+                        st.info(f"📝 Word document content extracted successfully. {len(content.split())} words found.")
+                    else:
+                        st.error(content if content.startswith("Error") else "Could not extract content from Word document")
+                        st.info("📝 Word documents are processed and indexed for analysis. Use the chat feature to ask questions about this document.")
+                    
+            except Exception as e:
+                st.error(f"Error reading file: {str(e)}")
+        return
 
-    # Handle scraped data viewing SECOND (before vector store check)
     elif st.session_state.get("viewing_scraped_data") and st.session_state.get("selected_website"):
         website = st.session_state.selected_website
         full_name = get_website_full_name(website)
         
-        # Add a back button and website info
         col1, col2 = st.columns([1, 4])
         with col1:
             if st.button("← Back to Chat"):
@@ -551,21 +636,17 @@ def show_chat_page():
         
         st.divider()
         
-        # Get files for the selected website
         files = get_scraped_data_files(website)
         
         if files:
             st.markdown(f"**Latest updates from {full_name}:**")
             
-            # Create tabs for each file
             if len(files) == 1:
-                # If only one file, display it directly
                 file_name = files[0]
                 content = read_scraped_data_file(website, file_name)
                 
                 st.markdown(f"#### 📄 {file_name}")
                 
-                # Check if it's a markdown file and render accordingly
                 if file_name.endswith('.md'):
                     st.markdown(content, unsafe_allow_html=True)
                     st.info(f"📊 Markdown document contains {len(content.split())} words")
@@ -576,7 +657,6 @@ def show_chat_page():
                     st.text_area("Content:", content, height=500)
                     st.info(f"📊 Document contains {len(content.split())} words")
             else:
-                # If multiple files, use tabs
                 tab_names = [f"📄 {file_name}" for file_name in files]
                 tabs = st.tabs(tab_names)
                 
@@ -584,7 +664,6 @@ def show_chat_page():
                     with tab:
                         content = read_scraped_data_file(website, file_name)
                         
-                        # Check if it's a markdown file and render accordingly
                         if file_name.endswith('.md'):
                             st.markdown(content, unsafe_allow_html=True)
                             st.info(f"📊 Markdown document contains {len(content.split())} words")
@@ -596,10 +675,17 @@ def show_chat_page():
                             st.info(f"📊 Document contains {len(content.split())} words")
         else:
             st.info(f"No updates available for {full_name}")
-        return  # Exit early when viewing scraped data
+        return
 
-    # Check if user has documents or is in chat mode
     has_documents = os.path.exists(vector_store_path)
+    
+    has_faiss_index = False
+    if has_documents:
+        try:
+            files = os.listdir(vector_store_path)
+            has_faiss_index = 'index.faiss' in files and 'index.pkl' in files
+        except:
+            has_faiss_index = False
     
     if not has_documents and not st.session_state.current_chat_id:
         st.info("📄 Please upload documents (PDFs, Word docs, text files, etc.) or web URLs to begin analysis.")
@@ -616,15 +702,18 @@ def show_chat_page():
 
     if st.session_state.agent_executor is None:
         with st.spinner("Loading AI agent..."):
-            # Load user's vector store (if exists)
             user_vector_store = None
-            if has_documents:
-                user_vector_store = load_vector_store(vector_store_path)
+            if has_documents and has_faiss_index:
+                try:
+                    user_vector_store = load_vector_store(vector_store_path)
+                    if user_vector_store is None:
+                        st.error("❌ Failed to load vector store. Please rebuild the index.")
+                except Exception as e:
+                    st.error(f"❌ Error loading vector store: {str(e)}")
+                    st.info("💡 Try rebuilding the index from the 'Current Document' section.")
             
-            # Load global knowledge base
             global_vector_store = load_global_vector_store()
             
-            # Use appropriate agent based on available data sources
             if user_vector_store and global_vector_store:
                 st.session_state.agent_executor = get_combined_conversational_agent(
                     user_vector_store, 
@@ -646,44 +735,37 @@ def show_chat_page():
                 )
                 st.info("📚 AI agent loaded with access to global knowledge base only")
             else:
-                # No documents available - create a basic agent
                 from langchain_google_genai import ChatGoogleGenerativeAI
                 llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.7)
                 st.session_state.agent_executor = llm
                 st.warning("⚠️ No documents or knowledge base available. AI will provide general assistance only.")
 
     elif st.session_state.current_chat_id:
-        for message in st.session_state.chat_history:
-            role = "AI" if isinstance(message, AIMessage) else "Human"
-            with st.chat_message(role):
-                st.markdown(message.content)
-
-        if user_query := st.chat_input("Ask questions about your documents or the knowledge base..."):
+        if st.session_state.pending_question:
+            user_query = st.session_state.pending_question
+            st.session_state.pending_question = None
+            
             st.session_state.chat_history.append(HumanMessage(content=user_query))
+            
             with st.chat_message("Human"):
                 st.markdown(user_query)
-
+            
             with st.chat_message("AI"):
                 with st.spinner("Thinking..."):
                     try:
-                        # Check if it's a combined agent or basic LLM
                         if hasattr(st.session_state.agent_executor, 'invoke') and hasattr(st.session_state.agent_executor, 'retrieval_fn'):
-                            # Combined agent
                             response = st.session_state.agent_executor.invoke({"query": user_query})
                             answer = response["result"]
                         elif hasattr(st.session_state.agent_executor, 'invoke') and not hasattr(st.session_state.agent_executor, 'retrieval_fn'):
-                            # Regular QA agent
                             response = st.session_state.agent_executor.invoke({
                                 "input": user_query,
                                 "chat_history": st.session_state.chat_history
                             })
                             answer = response.get("output", response.get("result", "I couldn't process your question."))
                         else:
-                            # Basic LLM
                             response = st.session_state.agent_executor.invoke(user_query)
                             answer = response.content
                     except Exception as e:
-                        # Fallback for any agent type
                         try:
                             if hasattr(st.session_state.agent_executor, 'invoke'):
                                 response = st.session_state.agent_executor.invoke(user_query)
@@ -697,6 +779,52 @@ def show_chat_page():
                             answer = "I'm sorry, I encountered an error. Please try again."
                     
                     st.markdown(answer)
+                    
+            
+            st.session_state.chat_history.append(AIMessage(content=answer))
+            save_chat_history(st.session_state.username, st.session_state.current_chat_id, st.session_state.chat_history)
+            st.rerun()
+        
+        for message in st.session_state.chat_history:
+            role = "AI" if isinstance(message, AIMessage) else "Human"
+            with st.chat_message(role):
+                st.markdown(message.content)
+
+        if user_query := st.chat_input("Ask questions about your documents or the knowledge base..."):
+            st.session_state.chat_history.append(HumanMessage(content=user_query))
+            with st.chat_message("Human"):
+                st.markdown(user_query)
+
+            with st.chat_message("AI"):
+                with st.spinner("Thinking..."):
+                    try:
+                        if hasattr(st.session_state.agent_executor, 'invoke') and hasattr(st.session_state.agent_executor, 'retrieval_fn'):
+                            response = st.session_state.agent_executor.invoke({"query": user_query})
+                            answer = response["result"]
+                        elif hasattr(st.session_state.agent_executor, 'invoke') and not hasattr(st.session_state.agent_executor, 'retrieval_fn'):
+                            response = st.session_state.agent_executor.invoke({
+                                "input": user_query,
+                                "chat_history": st.session_state.chat_history
+                            })
+                            answer = response.get("output", response.get("result", "I couldn't process your question."))
+                        else:
+                            response = st.session_state.agent_executor.invoke(user_query)
+                            answer = response.content
+                    except Exception as e:
+                        try:
+                            if hasattr(st.session_state.agent_executor, 'invoke'):
+                                response = st.session_state.agent_executor.invoke(user_query)
+                                if hasattr(response, 'content'):
+                                    answer = response.content
+                                else:
+                                    answer = str(response)
+                            else:
+                                answer = "I'm sorry, I couldn't process your question. Please try again."
+                        except:
+                            answer = "I'm sorry, I encountered an error. Please try again."
+                    
+                    st.markdown(answer)
+                    
             
             st.session_state.chat_history.append(AIMessage(content=answer))
             
